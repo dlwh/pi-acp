@@ -444,6 +444,85 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
   })
 })
 
+test('PiAcpSession: reports current Pi compaction failure events', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn)
+  })
+
+  proc.emit({ type: 'compaction_start', reason: 'overflow' })
+  proc.emit({ type: 'compaction_end', reason: 'overflow', errorMessage: 'summary hit the token cap' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(
+    conn.updates.map(update => update.update),
+    [
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' }
+      },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Context compaction failed: summary hit the token cap' }
+      }
+    ]
+  )
+})
+
+test('PiAcpSession: compacts before a reasoning-heavy response exhausts context', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { contextUsage: { tokens: 99_361, contextWindow: 131_072 } }
+  proc.statsAfterCompact = { contextUsage: { tokens: 20_000, contextWindow: 131_072 } }
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn)
+  })
+
+  await session.publishContextUsage()
+  const turn = session.prompt('continue')
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(proc.compactCount, 1)
+  assert.deepEqual(proc.prompts, [{ message: 'continue', attachments: [] }])
+  proc.emit({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop' }] })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await turn, 'end_turn')
+})
+
+test('PiAcpSession: reports failed preflight compaction without sending a one-token prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { contextUsage: { tokens: 127_000, contextWindow: 131_072 } }
+  proc.compactError = new Error('summary hit the token cap')
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn)
+  })
+
+  await session.publishContextUsage()
+  assert.equal(await session.prompt('continue'), 'error')
+  assert.equal(proc.compactCount, 1)
+  assert.equal(proc.prompts.length, 0)
+  assert.ok(
+    conn.updates.some(update =>
+      JSON.stringify(update.update).includes('Pi could not compact a nearly full context: summary hit the token cap')
+    )
+  )
+})
+
 test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with text_delta events', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
