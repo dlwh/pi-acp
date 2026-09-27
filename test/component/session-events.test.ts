@@ -657,19 +657,54 @@ test('PiAcpSession: prompt stays open through retry runs until agent_settled', a
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 2000 })
-  proc.emit({ type: 'agent_end', willRetry: true })
+  proc.emit({
+    type: 'agent_end',
+    messages: [{ role: 'assistant', content: [], stopReason: 'length' }],
+    willRetry: true
+  })
   await new Promise(r => setTimeout(r, 0))
   assert.equal(resolved, false)
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end', willRetry: false })
+  proc.emit({
+    type: 'agent_end',
+    messages: [{ role: 'assistant', content: [], stopReason: 'stop' }],
+    willRetry: false
+  })
   await new Promise(r => setTimeout(r, 0))
   assert.equal(resolved, false)
 
   proc.emit({ type: 'agent_settled' })
   const reason = await p
   assert.equal(reason, 'end_turn')
+})
+
+test('PiAcpSession: maps final assistant length stop to max_tokens', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const p = session.prompt('hello')
+  proc.emit({
+    type: 'agent_end',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: [], stopReason: 'length' }
+    ],
+    willRetry: false
+  })
+  proc.emit({ type: 'agent_settled' })
+
+  assert.equal(await p, 'max_tokens')
 })
 
 test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {

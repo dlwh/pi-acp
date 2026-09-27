@@ -33,6 +33,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { piCompletionStopReason } from './translate/pi-stop-reason.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -42,7 +43,7 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'max_tokens' | 'cancelled' | 'error'
 
 type PendingTurn = {
   resolve: (reason: StopReason) => void
@@ -291,6 +292,7 @@ export class PiAcpSession {
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
+  private completedStopReason: StopReason = 'end_turn'
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
@@ -462,7 +464,7 @@ export class PiAcpSession {
     // delivered before we resolve the ACP `session/prompt` request.
     await this.publishContextUsage()
 
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+    const reason: StopReason = this.cancelRequested ? 'cancelled' : this.completedStopReason
     this.pendingTurn?.resolve(reason)
     this.pendingTurn = null
     this.inAgentLoop = false
@@ -539,6 +541,7 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
+    this.completedStopReason = 'end_turn'
     this.inAgentLoop = false
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
@@ -898,6 +901,7 @@ export class PiAcpSession {
       case 'agent_end': {
         // One low-level run ended. Pi may still retry, compact, or process a queued
         // continuation, so keep the ACP turn open until `agent_settled`.
+        this.completedStopReason = piCompletionStopReason(ev.messages)
         this.inAgentLoop = false
         break
       }
